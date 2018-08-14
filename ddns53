@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+
+DATE_FORMAT="%Y-%m-%d %H:%M:%S"
+TTL="${DDNS_ROUTE53_TTL:-300}"
+RECORD_TYPE="${DDNS_ROUTE53_TYPE:-A}"
+COMMENT="${DDNS_ROUTE53_COMMENT:Updated at $(date +"$DATE_FORMAT")}"
+ZONE_ID="$DDNS_ROUTE53_ZONE_ID"
+RECORD_SET="$DDNS_ROUTE53_RECORD_SET"
+
+function log() {
+  echo "$@"
+}
+
+function errlog() {
+  echo "$@" >&2
+}
+
+function validate-args() {
+  if [[ -z "$ZONE_ID" ]]; then
+    errlog "Missing \$DDNS_ROUTE53_ZONE_ID"
+    return 1
+  fi
+  if [[ -z "$RECORD_SET" ]]; then
+    errlog "Missing \$DDNS_ROUTE53_RECORD_SET"
+    return 1
+  fi
+  return 0
+}
+
+function fetch-current-ip() {
+  aws route53 list-resource-record-sets \
+  --hosted-zone-id "$ZONE_ID" \
+  --output text \
+  --query "ResourceRecordSets[?Name == '$RECORD_SET.' && Type == '$RECORD_TYPE'].ResourceRecords[0].Value | [0] || ''"
+}
+
+function update-dns-entry() {
+  local ip=$1 output success batch
+  read -r -d '' batch << EOF
+{
+  "Comment": "$COMMENT",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "ResourceRecords": [{"Value": "$ip"}],
+        "Name": "$RECORD_SET",
+        "Type": "$RECORD_TYPE",
+        "TTL": $TTL
+      }
+    }
+  ]
+}
+EOF
+  output="$(aws route53 change-resource-record-sets --hosted-zone-id "$ZONE_ID" --change-batch "$batch" 2>&1)"
+  success=$?
+  if (( success == 0 )); then
+    log "$output"
+  else
+    errlog "Failed to update DNS entry:"
+    errlog "$output"
+  fi
+  return $success
+}
+
+function main() {
+  validate-args || exit 1
+  IP="$(dig +short myip.opendns.com @resolver1.opendns.com)"
+  OLD_IP="$(fetch-current-ip 2> /dev/null)"
+  if [[ "$OLD_IP" != "$IP" ]]; then
+    log "IP changed from '$OLD_IP' to '$IP', updating entry"
+    update-dns-entry "$IP"
+  else
+    log "Current IP == $IP"
+  fi
+  return 0
+}
+
+main "$@"
